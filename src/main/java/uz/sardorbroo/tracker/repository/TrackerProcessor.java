@@ -3,6 +3,8 @@ package uz.sardorbroo.tracker.repository;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import jakarta.transaction.TransactionalException;
+import lombok.RequiredArgsConstructor;
 import lombok.SneakyThrows;
 import uz.sardorbroo.tracker.TrackerConfigContext;
 import uz.sardorbroo.tracker.TrackerPredications;
@@ -11,6 +13,9 @@ import uz.sardorbroo.tracker.domain.Tracker;
 import uz.sardorbroo.tracker.domain.TrackerConfig;
 import uz.sardorbroo.tracker.domain.Verification;
 import uz.sardorbroo.tracker.domain.enumeration.TrackingType;
+import uz.sardorbroo.tracker.exception.AccessDeniedException;
+import uz.sardorbroo.tracker.exception.NotFoundException;
+import uz.sardorbroo.tracker.exception.TrackerException;
 import uz.sardorbroo.tracker.pojo.Checking;
 import uz.sardorbroo.tracker.pojo.VerificationResult;
 import uz.sardorbroo.tracker.pojo.Verified;
@@ -23,17 +28,16 @@ import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
 
+@RequiredArgsConstructor
 public class TrackerProcessor<ENTITY, ID> {
     private static final ObjectMapper MAPPER = new ObjectMapper()
             .registerModule(new JavaTimeModule());
-    private final TrackerConfigContext context = TrackerConfigContext.getInstance();
+    // private final TrackerConfigContext context = TrackerConfigContext.getInstance();
     private final Storage<ENTITY, ID> storage;
+    private final TrackerRepository trackerRepository;
+    private final TrackerConfigRepository trackerConfigRepository;
+    private final VerificationRepository verificationRepository;
     private final TrackerPredications trackerPredications;
-
-    public TrackerProcessor(Storage<ENTITY, ID> storage, TrackerPredications trackerPredications) {
-        this.storage = storage;
-        this.trackerPredications = trackerPredications;
-    }
 
     public Tracker create(ENTITY entity, Supplier<String> userIdFinder) {
         return track(entity, userIdFinder.get(), TrackingType.CREATE);
@@ -58,7 +62,7 @@ public class TrackerProcessor<ENTITY, ID> {
                 .setCreateBy(userId)
                 .setCreateAt(Instant.now());
 
-        context.add(tracker);
+        trackerRepository.create(tracker);
         return tracker;
     }
 
@@ -66,30 +70,34 @@ public class TrackerProcessor<ENTITY, ID> {
     // make dynamic getting verifier ID
     public VerificationResult verify(UUID trackerId, String verifierId) throws RuntimeException {
 
-        Tracker tracker = context.get(trackerId);
+        Tracker tracker = trackerRepository.getById(trackerId)
+                .orElseThrow(() -> new NotFoundException("Tracker is not found by given ID! ID: " + trackerId));
         if (tracker.isVerified()) {
-            throw new RuntimeException("Tracker has already verified!");
+            throw new TrackerException("Tracker has already verified!");
         }
-        TrackerConfig config = context.get(tracker.getEntity());
+
+        TrackerConfig config = trackerConfigRepository.getByEntity(tracker.getEntity())
+                .orElseThrow(() -> new NotFoundException("Tracker config is not found by given entity! Entity: " + tracker.getEntity()));
 
         Predicate<String> predication = trackerPredications.getById(config.getPredicationId());
         if (!predication.test(verifierId)) {
-            throw new RuntimeException("You cannot verify this data!");
+            throw new AccessDeniedException("You cannot verify this data!");
         }
 
-        // check is user really can verify
         Verification verification = new Verification()
                 .setId(UUID.randomUUID())
                 .setTrackerId(trackerId)
                 .setCreatedBy(verifierId)
                 .setCreatedAt(Instant.now());
-        context.add(verification);
 
-        List<Verification> verifications = context.getAllVerificationsByTrackerId(tracker.getId());
+        verificationRepository.create(verification);
+
+        List<Verification> verifications = verificationRepository.getAllVerificationsByTrackerId(tracker.getId());
+        // make it dynamic
         if (verifications.size() == config.getVerificationCount()) {
 
             tracker.setVerified(true);
-            context.add(tracker);
+            trackerRepository.update(tracker);
 
             ENTITY entity = convertToObj(tracker);
             Function<ENTITY, ENTITY> executor = storage.findMethodByTrackingType(tracker.getType());

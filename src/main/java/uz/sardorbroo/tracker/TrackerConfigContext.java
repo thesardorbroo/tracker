@@ -7,6 +7,7 @@ import uz.sardorbroo.tracker.domain.Verification;
 import java.util.*;
 
 // todo make it more abstract
+@Deprecated
 public class TrackerConfigContext {
     private static final ClassLoader CLASS_LOADER = ClassLoader.getSystemClassLoader();
     private static final TrackerConfigContext context = new TrackerConfigContext();
